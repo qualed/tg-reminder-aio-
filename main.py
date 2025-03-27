@@ -28,6 +28,7 @@ users_tz = {}
 class TaskStates(StatesGroup):
     waiting_for_task = State()
     waiting_for_tz = State()
+    waiting_for_del = State()
 
 @dp.message(Command("start"))
 async def start(message: Message):
@@ -46,8 +47,16 @@ async def start(message: Message):
     
 @dp.message(F.text == "📝 Добавить задачу")
 async def ask_for_task(message: Message, state: FSMContext):
-    await message.answer("Введити задачу, например: Запись к врачу 17.05.25 14:00")
-    await state.set_state(TaskStates.waiting_for_task)
+    user_id = message.from_user.id
+    user_tz = users_tz.get(user_id)
+    if user_tz:
+        await message.answer("Введити задачу, например:\n"
+                             "<code>Запись к врачу 17.05.25 14:00</code>", parse_mode="HTML")
+        await state.set_state(TaskStates.waiting_for_task)
+    else:
+        await message.answer("Давайте определим ваш часовой пояс. Введите разницу с МСК:\n"
+                             "<code>МСК+3</code>", parse_mode="HTML")
+        await state.set_state(TaskStates.waiting_for_tz)   
 
 @dp.message(Command("addtask"))
 async def comand_addtask(message: Message, state: FSMContext):
@@ -74,7 +83,8 @@ async def add_tz(message: Message, state: FSMContext):
         offset = int(tz_str.replace("МСК", "").replace("+", ""))
         users_tz[message.from_user.id] = offset
         await message.answer("Часовой пояс успешно установлен")  
-        await message.answer("Введити задачу, например: Запись к врачу 17.05.25 14:00")
+        await message.answer("Введити задачу, например:\n"
+                             "<code>Запись к врачу 17.05.25 14:00</code>", parse_mode="HTML")
         await state.set_state(TaskStates.waiting_for_task)
     except:
         await message.answer("Введити часовой пояс в формате: МСК+3, МСК0, МСК-1")  
@@ -82,36 +92,32 @@ async def add_tz(message: Message, state: FSMContext):
 async def add_task(message: Message, state: FSMContext):
     global task_id
     user_id = message.from_user.id
-    user_tz = users_tz.get(user_id)
-    if user_tz:
-        try:
-            task_str = message.text.split()
-            if task_str[0] == "/addtask":
-                task_str = task_str[1:]
-            date_str = task_str[-2].replace("/", ".").replace("-", ".")
-            time_str = task_str[-1].replace(".", ":")
-            desc = " ".join(task_str[:-2])
-            if len(date_str.split(".")) == 2:
-                date_str += f".{datetime.now().year}"
-            usertime_p = parser.parse(f"{date_str} {time_str}", dayfirst=True)
-            offset = users_tz[user_id]
-            #datetime_p = usertime_p.astimezone(moscow_tz) - timedelta(hours=offset)
-            datetime_p = usertime_p - timedelta(hours=offset) + timedelta(hours=1)
-            
-            tasks.setdefault(user_id, {})[task_id] = {
-                'desc': desc,
-                'datetime': usertime_p
-            }
-            
-            scheduler.add_job(remind, "date", run_date=datetime_p, args=[task_id, user_id])
-            task_id += 1
-            await message.answer("Задача успешно добавлена.")
-            await state.clear()
-        except:
-            await message.answer('Неверный формат. Пример: "Сходить в магазин 20.07.25 19:00"')
-    else:
-        await message.answer('Давайте определим ваш часовой пояс. Введите разницу с МСК: "МСК+3"')
-        await state.set_state(TaskStates.waiting_for_tz)
+    try:
+        task_str = message.text.split()
+        if task_str[0] == "/addtask":
+            task_str = task_str[1:]
+        date_str = task_str[-2].replace("/", ".").replace("-", ".")
+        time_str = task_str[-1].replace(".", ":")
+        desc = " ".join(task_str[:-2])
+        if len(date_str.split(".")) == 2:
+            date_str += f".{datetime.now().year}"
+        usertime_p = parser.parse(f"{date_str} {time_str}", dayfirst=True)
+        offset = users_tz[user_id]
+        #datetime_p = usertime_p.astimezone(moscow_tz) - timedelta(hours=offset)
+        datetime_p = usertime_p - timedelta(hours=offset) + timedelta(hours=1)
+        
+        tasks.setdefault(user_id, {})[task_id] = {
+            'desc': desc,
+            'datetime': usertime_p
+        }
+        
+        scheduler.add_job(remind, "date", run_date=datetime_p, args=[task_id, user_id])
+        await message.answer(f"Задача ID[{task_id}] успешно добавлена.")
+        task_id += 1
+        await state.clear()
+    except:
+        await message.answer("Неверный формат. Пример:\n"
+                             "<code>Сходить в магазин 20.07.25 19:00</code>", parse_mode="HTML")
 
 async def remind(task_id: int, user_id: int):
     task = tasks.get(user_id, {}).get(task_id)
@@ -119,7 +125,7 @@ async def remind(task_id: int, user_id: int):
         await bot.send_message(user_id, f"Напоминание: {task['desc']}")
         del tasks[user_id][task_id]
 
-@dp.message(Command("mytasks"))
+@dp.message(F.text == "📋 Мои задачи")
 async def my_tasks(message: Message):
     user_id = message.from_user.id
     if user_id in tasks and tasks[user_id]:
@@ -131,14 +137,20 @@ async def my_tasks(message: Message):
     else:
         await message.answer("У вас нет запланированных задач.")
 
-@dp.message(Command("deltask"))
-async def del_task(message: Message):
+@dp.message(F.text == "🗑 Удалить задачу")
+async def ask_for_del(message: Message, state: FSMContext):
+    await message.answer("Введите ID задачи:")
+    await state.set_state(TaskStates.waiting_for_del)
+
+@dp.message(TaskStates.waiting_for_del)
+async def del_task(message: Message, state: FSMContext):
     try:
-        task_id = int(message.text.split()[1])
+        task_id = int(message.text)
         user_tasks = tasks.get(message.from_user.id, {})
         if task_id in user_tasks:
             del user_tasks[task_id]
             await message.answer(f"Задача {task_id} удалена")
+            await state.clear()
         else:
             await message.answer("Такой задачи нет")
     except:
