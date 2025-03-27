@@ -1,13 +1,16 @@
 import os
 from datetime import datetime, timedelta, timezone
 from dateutil import parser
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Message
 from aiogram.filters import Command
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from pytz import timezone
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -22,32 +25,72 @@ task_id = 0
 users_tz = {}
 #moscow_tz = timezone('Europe/Moscow')
 
+class TaskStates(StatesGroup):
+    waiting_for_task = State()
+    waiting_for_tz = State()
+
 @dp.message(Command("start"))
 async def start(message: Message):
-    await message.answer("Привет. Тут ты можешь поставить себе напоминание. "
-                         "Используй /addtask [описание] [дата ДД.ММ.ГГ ЧЧ:ММ] чтобы добавить задачу.")
+    # Создаем клавиатуру
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📝 Добавить задачу")
+    builder.button(text="📋 Мои задачи")
+    builder.button(text="🗑 Удалить задачу")
+    builder.button(text="⚙ Настройки")
 
-@dp.message(Command("addtz"))
-async def add_tz(message: Message):
+    # Генерируем ReplyKeyboardMarkup
+    keyboard = builder.as_markup(resize_keyboard=True)
+    await message.answer('Привет. Тут ты можешь поставить себе напоминание. '
+                         'Нажми \n"📝 Добавить задачу"',
+                         reply_markup=keyboard)
+    
+@dp.message(F.text == "📝 Добавить задачу")
+async def ask_for_task(message: Message, state: FSMContext):
+    await message.answer("Введити задачу, например: Запись к врачу 17.05.25 14:00")
+    await state.set_state(TaskStates.waiting_for_task)
+
+@dp.message(Command("addtask"))
+async def comand_addtask(message: Message, state: FSMContext):
+    await add_task(message, state)
+    
+@dp.message(TaskStates.waiting_for_task)
+async def btn_addtask(message: Message, state: FSMContext):
+    await add_task(message, state)
+
+# Прикольная фишка, но вряд ли используем на практике. если await state.set_state(...) выполнится с задержкой,
+#   и обработчик не сработает:
+# @dp.message()
+# async def catch_any_message(message: Message, state: FSMContext):
+#     current_state = await state.get_state()
+#     if current_state == TaskStates.waiting_for_task:
+#         await btn_addtask(message, state)  
+#     else:
+#         await message.answer("Я не понял. Используйте кнопки или команды!")
+    
+@dp.message(TaskStates.waiting_for_tz)
+async def add_tz(message: Message, state: FSMContext):
     try:
         tz_str = message.text.split()[-1].upper()
         offset = int(tz_str.replace("МСК", "").replace("+", ""))
         users_tz[message.from_user.id] = offset
         await message.answer("Часовой пояс успешно установлен")  
+        await message.answer("Введити задачу, например: Запись к врачу 17.05.25 14:00")
+        await state.set_state(TaskStates.waiting_for_task)
     except:
         await message.answer("Введити часовой пояс в формате: МСК+3, МСК0, МСК-1")  
 
-@dp.message(Command("addtask"))
-async def add_task(message: Message):
+async def add_task(message: Message, state: FSMContext):
     global task_id
     user_id = message.from_user.id
     user_tz = users_tz.get(user_id)
     if user_tz:
         try:
             task_str = message.text.split()
+            if task_str[0] == "/addtask":
+                task_str = task_str[1:]
             date_str = task_str[-2].replace("/", ".").replace("-", ".")
             time_str = task_str[-1].replace(".", ":")
-            desc = " ".join(task_str[1:-2])
+            desc = " ".join(task_str[:-2])
             if len(date_str.split(".")) == 2:
                 date_str += f".{datetime.now().year}"
             usertime_p = parser.parse(f"{date_str} {time_str}", dayfirst=True)
@@ -63,10 +106,12 @@ async def add_task(message: Message):
             scheduler.add_job(remind, "date", run_date=datetime_p, args=[task_id, user_id])
             task_id += 1
             await message.answer("Задача успешно добавлена.")
+            await state.clear()
         except:
-            await message.answer("Неверный формат. Пример: /addtask Сходить в магазин 20.07.25 19:00")
+            await message.answer('Неверный формат. Пример: "Сходить в магазин 20.07.25 19:00"')
     else:
-        await message.answer("Давайте определим ваш часовой пояс. Введите /addtz Мск +-?")
+        await message.answer('Давайте определим ваш часовой пояс. Введите разницу с МСК: "МСК+3"')
+        await state.set_state(TaskStates.waiting_for_tz)
 
 async def remind(task_id: int, user_id: int):
     task = tasks.get(user_id, {}).get(task_id)
